@@ -94,7 +94,7 @@ void expand_overlap(struct dedispersion_setup *s) {
             icount<=bytes_total-bytes_per_fft; 
             icount+=bytes_per_fft-bytes_overlap,
             ocount+=bytes_per_fft)
-        cudaMemcpy(s->overlap_gpu + ocount, s->tbuf_gpu + icount,
+        cudaMemcpy(s->overlap_gpu + ocount, s->tbuf_tr_gpu + icount,
                 bytes_per_fft, cudaMemcpyDeviceToDevice);
 }
 
@@ -124,6 +124,35 @@ void transfer_collapse_overlap(struct dedispersion_setup *s) {
     }
 
 }
+
+
+/* Coalesced transpose (or corner-turn) with no bank conflicts 
+ * Assume two 8-bit complex polarizations
+ * Each block transposes/copies a tile of tile_dim x tile_dim elements
+ * using tile_dim x block_rows threads, so that each thread transposes
+ * tile_dim/block_rows elements.  tile_dim must be an integral multiple of block_rows
+ */
+__global__ void corner_turn(char4 *odata, char4 *idata, int nchan, int npts_per_block, int tile_dim, int block_rows) {
+    __shared__ char4 tile[16][17];
+
+    int xIndex = blockIdx.x * tile_dim + threadIdx.x;
+    int yIndex = blockIdx.y * tile_dim + threadIdx.y;
+    int index_in = xIndex + (yIndex)*nchan;
+
+    xIndex = blockIdx.y * tile_dim + threadIdx.x;
+    yIndex = blockIdx.x * tile_dim + threadIdx.y;
+    int index_out = xIndex + (yIndex)*npts_per_block;
+
+    for (int i=0; i<tile_dim; i+=block_rows) {
+      tile[threadIdx.y+i][threadIdx.x] = idata[index_in+i*nchan];
+    }
+    __syncthreads();
+
+    for (int i=0; i<tile_dim; i+=block_rows) {
+      odata[index_out+i*npts_per_block] = tile[threadIdx.x][threadIdx.y+i];
+    }
+}
+
 
 /* Fills in the freq-domain chirp, given the input params.
  * Assumes memory has already been allocated.  If fft_len has not
@@ -235,6 +264,20 @@ void init_dedispersion(struct dedispersion_setup *s) {
 
     printf("fft_len=%d overlap=%d\n", s->fft_len, s->overlap); fflush(stdout);
 
+    // Figure out the transpose parameters
+    if (s->nchan==4) {
+        s->tile_dim = 4;
+        s->block_rows = 4;
+    } else if (s->nchan==8) {
+        s->tile_dim = 8;
+        s->block_rows = 8;
+    } else if (s->nchan>=16) {
+        s->tile_dim = 16;
+        s->block_rows = 8;
+    } else {	
+        printf("Nchan (%d) not supported!\n", s->nchan);
+    }	
+
     // Figure out how many FFTs per block
     s->nfft_per_block = 1;
     int npts_used = s->fft_len;
@@ -261,7 +304,8 @@ void init_dedispersion(struct dedispersion_setup *s) {
     cudaError_t rv = cudaHostAlloc((void**)&(s->tbuf_host), bytes_in, 
             cudaHostAllocWriteCombined);
     cudaMalloc((void**)&s->tbuf_gpu, bytes_in);
-    total_gpu_mem += bytes_in;
+    cudaMalloc((void**)&s->tbuf_tr_gpu, bytes_in);
+    total_gpu_mem += 2*bytes_in;
     cudaMalloc((void**)&s->overlap_gpu, bytes_tot);
     total_gpu_mem += bytes_tot;
     cudaMalloc((void**)&s->databuf0_gpu, 2 * bytes_databuf);
@@ -271,7 +315,7 @@ void init_dedispersion(struct dedispersion_setup *s) {
     total_gpu_mem += bytes_chirp;
     for (i=0; i<s->nchan; i++) s->chirp_gpu[i] = s->chirp_gpu[0] + i*s->fft_len;
 
-    printf("alloced mem\n"); fflush(stdout);
+    printf("allocated mem\n"); fflush(stdout);
     printf("total_gpu_mem = %d MB\n", total_gpu_mem >> 20);
 
     cudaThreadSynchronize();
@@ -339,11 +383,12 @@ void accumulate_timers(struct dedispersion_times *t) {
     cudaEventSynchronize(t->t[16]);
 
     get_time(0,1,transfer_to_gpu);
-    get_time(1,2,overlap);
-    get_time(2,3,bit_to_float);
-    get_time(3,4,fft);
-    get_time(4,5,xmult);
-    get_time(5,6,fft);
+    get_time(1,2,corner_turn);
+    get_time(2,3,overlap);
+    get_time(3,4,bit_to_float);
+    get_time(4,5,fft);
+    get_time(5,6,xmult);
+    get_time(6,7,fft);
     get_time(8,9,downsample);
     get_time(9,10,transfer_to_host);
     get_time(12,13,fold_mem);
@@ -378,31 +423,36 @@ void dedisperse(struct dedispersion_setup *s, int ichan,
     cudaMemcpy(s->tbuf_gpu, s->tbuf_host, bytes_in, cudaMemcpyHostToDevice);
     cudaEventRecord(s->time.t[1]); // Finish HtoD
 
+    /* Corner turn the data */
+    dim3 grid(s->nchan/s->tile_dim, s->npts_per_block/s->tile_dim), threads(s->tile_dim, s->block_rows);
+    corner_turn<<<grid, threads>>>((char4 *)s->tbuf_tr_gpu, (char4 *)s->tbuf_gpu, s->nchan, s->npts_per_block, s->tile_dim, s->block_rows);
+    cudaEventRecord(s->time.t[2]); // Finish Corner turn
+
     /* Expand overlap */
     expand_overlap(s);
-    cudaEventRecord(s->time.t[2]); // Finish overlap
+    cudaEventRecord(s->time.t[3]); // Finish overlap
 
     /* Convert to floating point */
     byte_to_float_2pol_complex<<<16,128>>>((unsigned short *)s->overlap_gpu, 
             s->databuf0_gpu, s->databuf1_gpu, npts_tot);
-    cudaEventRecord(s->time.t[3]); // Finish covert
+    cudaEventRecord(s->time.t[4]); // Finish covert
 
     /* Forward FFT */
     fft_rv = cufftExecC2C(s->plan, s->databuf0_gpu, s->databuf0_gpu, 
             CUFFT_FORWARD);
-    cudaEventRecord(s->time.t[4]); // Finish FFT
+    cudaEventRecord(s->time.t[5]); // Finish FFT
 
     /* Multiply by chirp */
     dim3 gd(2*s->nfft_per_block, s->fft_len/4096, 1);
     //dim3 gd(2*s->nfft_per_block, 1, 1);
     vector_multiply_complex<<<gd,64>>>(s->databuf0_gpu,
             s->chirp_gpu[ichan], s->fft_len);
-    cudaEventRecord(s->time.t[5]); // Finish xmult
+    cudaEventRecord(s->time.t[6]); // Finish xmult
 
     /* Inverse FFT */
     fft_rv = cufftExecC2C(s->plan, s->databuf0_gpu, s->databuf0_gpu, 
             CUFFT_INVERSE);
-    cudaEventRecord(s->time.t[6]); // Finish IFFT
+    cudaEventRecord(s->time.t[7]); // Finish IFFT
 
     int nvalid = s->nfft_per_block*(s->fft_len-s->overlap);
     s->time.nsamp_tot += nvalid;
@@ -441,6 +491,7 @@ void print_timing_report(struct dedispersion_setup *s) {
     printf("Total2 time = %6.1f s (%.4f ns/samp)\n", 
             s->time.total2/1e3, 1e6*s->time.total2/(double)s->time.nsamp_tot);
     print_percent(transfer_to_gpu);
+    print_percent(corner_turn);
     print_percent(overlap);
     print_percent(bit_to_float);
     print_percent(fft);
@@ -458,6 +509,7 @@ void print_timing_report(struct dedispersion_setup *s) {
             s->time.total/(double)s->time.nsamp_tot,
             s->gp->drop_frac_tot);
     print_percent_short(transfer_to_gpu);
+    print_percent_short(corner_turn);
     print_percent_short(overlap);
     print_percent_short(bit_to_float);
     print_percent_short(fft);

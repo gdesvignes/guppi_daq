@@ -12,6 +12,7 @@
 #define NTIMERS 32
 struct dedispersion_times {
     double transfer_to_gpu;
+    double corner_turn;
     double overlap;
     double bit_to_float;
     double fft;
@@ -58,6 +59,7 @@ struct dedispersion_setup {
     // Memory blocks, etc on the host and/or GPU
     unsigned char *tbuf_host;     // host memory for data transfer
     unsigned char *tbuf_gpu;      // gpu memory for data transfer
+    unsigned char *tbuf_tr_gpu;   // gpu memory for corner-turned data
     unsigned char *overlap_gpu;   // overlapped raw data
     float2 *databuf0_gpu;         // floating-point data on gpu, pol 0
     float2 *databuf1_gpu;         // floating-point data on gpu, pol 1
@@ -76,6 +78,10 @@ struct dedispersion_setup {
     // GPU control stuff
     cufftHandle plan;           // CUFFT plan
     int fold_thread_per_block;  // Thread info for folding.
+
+    // Parameters for transpose
+    int tile_dim;
+    int block_rows;
 
     // Benchmark
     struct dedispersion_times time;

@@ -70,8 +70,15 @@ void parkes_to_guppi(struct guppi_udp_packet *b, const int acc_len,
  */
 void guppi_udp_packet_data_copy(char *out, const struct guppi_udp_packet *p);
 
+/* Copy for baseband multichannel modes
+ * The corner turn is assumed to be done in the GPU.
+ */
+void guppi_udp_packet_raw_data_copy(char *databuf, int nchan,
+        unsigned block_pkt_idx, unsigned packets_per_block,
+        const struct guppi_udp_packet *p);
+
 /* Copy and corner turn for baseband multichannel modes */
-void guppi_udp_packet_data_copy_transpose(char *databuf, int nchan,
+void guppi_udp_packet_raw_data_copy_transpose(char *databuf, int nchan,
         unsigned block_pkt_idx, unsigned packets_per_block,
         const struct guppi_udp_packet *p);
 

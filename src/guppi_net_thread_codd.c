@@ -146,7 +146,7 @@ void write_baseband_packet_to_block(struct datablock_stats *d,
 
     const unsigned long long seq_num = guppi_udp_packet_seq_num(p);
     int block_pkt_idx = seq_num - d->packet_idx;
-    guppi_udp_packet_data_copy_transpose(
+    guppi_udp_packet_raw_data_copy(
             guppi_databuf_data(d->db, d->block_idx),
             nchan, block_pkt_idx, 
             d->packets_per_block, p);

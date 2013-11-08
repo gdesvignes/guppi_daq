@@ -194,6 +194,23 @@ void guppi_udp_packet_data_copy(char *out, const struct guppi_udp_packet *p) {
     }
 }
 
+/* Copy function for baseband data.
+ * block_pkt_idx is the seq number of this packet relative
+ * to the beginning of the block.  packets_per_block
+ * is the total number of packets per data block (all channels).
+ */
+void guppi_udp_packet_raw_data_copy(char *databuf, int nchan,
+	unsigned block_pkt_idx, unsigned packets_per_block,
+	const struct guppi_udp_packet *p) {
+    const size_t bytes_per_sample = 4;
+    const unsigned samp_per_packet = guppi_udp_packet_datasize(p->packet_size)
+        / bytes_per_sample / nchan;
+    char *optr;
+    optr = databuf + bytes_per_sample * block_pkt_idx*samp_per_packet;
+    memcpy(optr, guppi_udp_packet_data(p),
+                guppi_udp_packet_datasize(p->packet_size));
+}
+
 /* Copy function for baseband data that does a partial
  * corner turn (or transpose) based on nchan.  In this case
  * out should point to the beginning of the data buffer.
@@ -201,7 +218,7 @@ void guppi_udp_packet_data_copy(char *out, const struct guppi_udp_packet *p) {
  * to the beginning of the block.  packets_per_block
  * is the total number of packets per data block (all channels).
  */
-void guppi_udp_packet_data_copy_transpose(char *databuf, int nchan,
+void guppi_udp_packet_raw_data_copy_transpose(char *databuf, int nchan,
         unsigned block_pkt_idx, unsigned packets_per_block,
         const struct guppi_udp_packet *p) {
     const unsigned chan_per_packet = nchan;
